@@ -33,11 +33,12 @@ class VehicleParams:
 
 class TwoLayerPathPlannerV35:
     """
-    两层（多圈）路径规划器 V3.5
+    两层路径规划器 V3.5 - 真正的两层规划
     
     核心概念:
     - 第一层: 主作业区域（田地中间的矩形区域）
     - 第二层（多圈）: 田头覆盖
+
     """
     
     def __init__(
@@ -45,7 +46,9 @@ class TwoLayerPathPlannerV35:
         field_length: float,
         field_width: float,
         vehicle_params: VehicleParams,
-        obstacles: List[List[Tuple[float, float]]] = None
+        obstacles: List[List[Tuple[float, float]]] = None,
+        start_point: Tuple[float, float] = None,
+        end_point: Tuple[float, float] = None
     ):
         self.field_length = field_length
         self.field_width = field_width
@@ -58,12 +61,20 @@ class TwoLayerPathPlannerV35:
         # 自动选择主作业模式
         self.main_work_pattern = self._select_main_work_pattern()
         
-        print(f"[V3.5] 初始化完成:")
+        # 起点和终点约束 (V3.5.1 新增)
+        self.start_point = self._validate_point(start_point, "start")
+        self.end_point = self._validate_point(end_point, "end")
+        
+        print(f"[V3.5.1] 初始化完成:")
         print(f"  田地尺寸: {field_length}m × {field_width}m")
         print(f"  田头宽度: {self.headland_width:.1f}m (自动计算)")
         print(f"  主作业模式: {self.main_work_pattern}")
         print(f"  障碍物数量: {len(self.obstacles)}")
-        print(f"  新特性: 真正的两层规划 + 切线方向倒车")
+        if self.start_point:
+            print(f"  起点位置: ({self.start_point[0]:.1f}, {self.start_point[1]:.1f})")
+        if self.end_point:
+            print(f"  终点位置: ({self.end_point[0]:.1f}, {self.end_point[1]:.1f})")
+        print(f"  新特性: 真正的两层规划 + 切线方向倒车 + 智能起点选择")
     
     def _calculate_headland_width(self) -> float:
         """
@@ -92,13 +103,84 @@ class TwoLayerPathPlannerV35:
         else:
             return "U型往复"
     
+    def _validate_point(self, point: Tuple[float, float], point_type: str) -> Tuple[float, float]:
+        """
+        验证起点/终点是否在田地边界内
+        
+        Args:
+            point: 点坐标 (x, y)
+            point_type: 点类型 ("start" 或 "end")
+        
+        Returns:
+            验证后的点坐标，如果为None则返回None
+        """
+        if point is None:
+            return None
+        
+        x, y = point
+        
+        # 检查是否在田地边界内
+        if not (0 <= x <= self.field_length and 0 <= y <= self.field_width):
+            print(f"  警告: {point_type}点 ({x:.1f}, {y:.1f}) 超出田地边界，将被忽略")
+            return None
+        
+        return (x, y)
+    
+    def _get_possible_start_corners(self) -> List[Tuple[float, float, str]]:
+        """
+        获取所有可能的起点角落（田头路径的4个角落）
+        
+        Returns:
+            List of (x, y, corner_name)
+        """
+        w = self.headland_width
+        return [
+            (w / 2, w / 2, "左下角"),
+            (self.field_length - w / 2, w / 2, "右下角"),
+            (self.field_length - w / 2, self.field_width - w / 2, "右上角"),
+            (w / 2, self.field_width - w / 2, "左上角")
+        ]
+    
+    def _select_best_start_corner(self, parking_position: Tuple[float, float]) -> Tuple[int, Tuple[float, float], str]:
+        """
+        智能选择最优起点角落
+        
+        Args:
+            parking_position: 停放位置 (x, y)
+        
+        Returns:
+            (corner_index, corner_position, corner_name)
+        """
+        possible_corners = self._get_possible_start_corners()
+        
+        # 计算每个角落到停放位置的距离
+        distances = []
+        for i, (x, y, name) in enumerate(possible_corners):
+            dist = np.sqrt((x - parking_position[0])**2 + (y - parking_position[1])**2)
+            distances.append((i, dist, (x, y), name))
+        
+        # 选择距离最近的角落
+        best = min(distances, key=lambda x: x[1])
+        corner_index, dist, corner_pos, corner_name = best
+        
+        print(f"  智能起点选择: {corner_name} ({corner_pos[0]:.1f}, {corner_pos[1]:.1f})")
+        print(f"  距离停放位置: {dist:.1f}m")
+        
+        return corner_index, corner_pos, corner_name
+    
     def plan_complete_coverage(self) -> Dict:
         """完整的两层路径规划"""
         print("\n" + "="*70)
-        print("开始两层路径规划 (V3.5 真正的两层规划)")
+        print("开始两层路径规划 (V3.5.1 真正的两层规划 + 智能起点)")
         print("="*70)
         
         start_time = time.time()
+        
+        # 智能起点选择 (V3.5.1 新增)
+        start_corner_index = 0  # 默认左下角
+        if self.start_point:
+            print("\n[智能起点] 根据停放位置选择最优起点...")
+            start_corner_index, _, _ = self._select_best_start_corner(self.start_point)
         
         # 第1层：主作业区域
         print("\n[第1层] 主作业区域规划...")
@@ -106,7 +188,7 @@ class TwoLayerPathPlannerV35:
         
         # 第2层：田头覆盖
         print("\n[第2层] 田头区域规划...")
-        headland_result = self._plan_headland_coverage()
+        headland_result = self._plan_headland_coverage(start_corner_index=start_corner_index)
         
         # 合并路径并应用强制降速
         print("\n[速度规划] 应用基于曲率的强制降速...")
@@ -132,14 +214,32 @@ class TwoLayerPathPlannerV35:
             headland_result['speeds']
         ) / 3600
         
+        # 添加起点/终点连接路径 (V3.5.1 新增)
+        approach_path = None
+        departure_path = None
+        
+        if self.start_point:
+            print("\n[起点连接] 生成从停放位置到作业起点的连接路径...")
+            first_work_point = headland_result['path'][0]
+            approach_path = self._generate_approach_path(self.start_point, first_work_point)
+            print(f"  连接路径长度: {self._calculate_path_length(approach_path):.1f}m")
+        
+        if self.end_point:
+            print("\n[终点连接] 生成从作业终点到停放位置的连接路径...")
+            last_work_point = headland_result['path'][-1]
+            departure_path = self._generate_departure_path(last_work_point, self.end_point)
+            print(f"  连接路径长度: {self._calculate_path_length(departure_path):.1f}m")
+        
         total_time = time.time() - start_time
         
         result = {
             'main_work': main_work_result,
             'headland': headland_result,
+            'approach_path': approach_path,
+            'departure_path': departure_path,
             'total_time': total_time,
-            'version': 'V3.5',
-            'features': ['真正两层', '切线倒车', '网格验证', '强制降速']
+            'version': 'V3.5.1',
+            'features': ['真正两层', '切线倒车', '网格验证', '强制降速', '智能起点']
         }
         
         print(f"\n{'='*70}")
@@ -439,8 +539,13 @@ class TwoLayerPathPlannerV35:
         
         return turn_path, turn_speeds
     
-    def _plan_headland_coverage(self) -> Dict:
-        """规划田头覆盖区域"""
+    def _plan_headland_coverage(self, start_corner_index: int = 0) -> Dict:
+        """
+        规划田头覆盖区域
+        
+        Args:
+            start_corner_index: 起始角落索引 (0=左下, 1=右下, 2=右上, 3=左上)
+        """
         # 田头区域
         field_boundary = Polygon([
             (0, 0),
@@ -459,7 +564,7 @@ class TwoLayerPathPlannerV35:
         headland_area = field_boundary.difference(main_boundary)
         
         # 生成多层环绕路径
-        path, speeds = self._generate_multilayer_headland(headland_area)
+        path, speeds = self._generate_multilayer_headland(headland_area, start_corner_index=start_corner_index)
         
         path_length = self._calculate_path_length(path)
         work_time = self._calculate_work_time(path, speeds)
@@ -479,12 +584,18 @@ class TwoLayerPathPlannerV35:
     
     def _generate_multilayer_headland(
         self,
-        headland_area: Polygon
+        headland_area: Polygon,
+        start_corner_index: int = 0
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
         生成田头边界路径
         
         V3.5 v5: 生成多圈路径覆盖田头区域
+        V3.5.1: 支持智能起点选择
+        
+        Args:
+            headland_area: 田头区域
+            start_corner_index: 起始角落索引 (0=左下, 1=右下, 2=右上, 3=左上)
         """
         import math
         
@@ -505,7 +616,7 @@ class TwoLayerPathPlannerV35:
             print(f"    第{loop_idx+1}圈: 偏移={offset:.1f}m, 倒车={'Yes' if with_reverse else 'No'}")
             
             path, speeds = self._generate_single_headland_loop_at_offset(
-                offset, with_reverse, loop_idx
+                offset, with_reverse, loop_idx, start_corner_index
             )
             
             all_paths.append(path)
@@ -520,7 +631,8 @@ class TwoLayerPathPlannerV35:
         self, 
         offset: float, 
         with_reverse: bool = True, 
-        loop_index: int = 0
+        loop_index: int = 0,
+        start_corner_index: int = 0
     ) -> Tuple[np.ndarray, List[float]]:
         """
         在指定偏移量处生成单圈田头边界路径
@@ -529,8 +641,10 @@ class TwoLayerPathPlannerV35:
             offset: 距离田地边界的距离
             with_reverse: 是否在角落处转弯+倒车
             loop_index: 当前圈的索引（0=最外圈）
+            start_corner_index: 起始角落索引 (0=左下, 1=右下, 2=右上, 3=左上)
         
         V3.5 v5: 支持多圈路径
+        V3.5.1: 支持智能起点选择
         """
         
         # 四个转角点
@@ -544,15 +658,17 @@ class TwoLayerPathPlannerV35:
         path_segments = []
         speeds = []
         
-        # 从左下角开始
-        start_point = corners[0]
+        # 从指定的角落开始 (V3.5.1 新增)
+        start_point = corners[start_corner_index]
         path_segments.append(np.array([start_point]))
         speeds.append(self.vehicle.max_headland_speed_kmh)
         
         # 沿着边界行驶，在4个角落处转弯（最外圈还需要倒车）
         for i in range(4):
-            current_corner = corners[i]
-            next_corner = corners[(i + 1) % 4]
+            current_idx = (start_corner_index + i) % 4
+            next_idx = (start_corner_index + i + 1) % 4
+            current_corner = corners[current_idx]
+            next_corner = corners[next_idx]
             
             # 直线段
             straight_path = self._generate_straight_segment(current_corner, next_corner, 20)
@@ -564,12 +680,12 @@ class TwoLayerPathPlannerV35:
                 if with_reverse:
                     # 最外圈：转弯 + 倒车填充间隙
                     turn_path, turn_speeds = self._generate_corner_turn_with_reverse(
-                        next_corner, (i + 1) % 4, layer_index=loop_index
+                        next_corner, next_idx, layer_index=loop_index
                     )
                 else:
                     # 内圈：只转弯，不倒车
                     turn_path, turn_speeds = self._generate_corner_turn_arc(
-                        next_corner, (i + 1) % 4
+                        next_corner, next_idx
                     )
                 path_segments.append(turn_path)
                 speeds.extend(turn_speeds)
@@ -876,6 +992,50 @@ class TwoLayerPathPlannerV35:
         
         times = distances / avg_speeds_ms
         return np.sum(times)
+    
+    def _generate_approach_path(
+        self,
+        start: Tuple[float, float],
+        end: Tuple[float, float],
+        num_points: int = 50
+    ) -> np.ndarray:
+        """
+        生成从停放位置到作业起点的连接路径
+        
+        Args:
+            start: 停放位置 (x, y)
+            end: 作业起点 (x, y)
+            num_points: 路径点数
+        
+        Returns:
+            连接路径
+        """
+        # 简单的直线连接
+        x = np.linspace(start[0], end[0], num_points)
+        y = np.linspace(start[1], end[1], num_points)
+        return np.column_stack([x, y])
+    
+    def _generate_departure_path(
+        self,
+        start: Tuple[float, float],
+        end: Tuple[float, float],
+        num_points: int = 50
+    ) -> np.ndarray:
+        """
+        生成从作业终点到停放位置的连接路径
+        
+        Args:
+            start: 作业终点 (x, y)
+            end: 停放位置 (x, y)
+            num_points: 路径点数
+        
+        Returns:
+            连接路径
+        """
+        # 简单的直线连接
+        x = np.linspace(start[0], end[0], num_points)
+        y = np.linspace(start[1], end[1], num_points)
+        return np.column_stack([x, y])
     
     def _calculate_coverage_rate(self, path: np.ndarray, area: Polygon) -> float:
         """计算覆盖率"""
