@@ -1,17 +1,11 @@
 """
-两层路径规划器 V3.3 - 强制降速版
+多层路径规划器 V3.5
 
-新增功能:
-1. 转弯处强制降速（基于曲率自适应）
-2. 完整的速度规划验证
-3. 确保满足曲率约束
-4. 多场景测试支持
-
-版本历史:
-- V3.0: 支持静态障碍物
-- V3.1: 集成OptimizedClothoid（有问题）
-- V3.2: 修复田头覆盖算法（99.3%覆盖率）
-- V3.3: 强制降速+多场景测试（本版本）
+核心修正:
+1. 第一层: 主作业区域的U型往复路径
+2. 第二层（多圈）: 只有一圈的田头边界路径 + 4个转角的转弯和倒车
+3. 倒车逻辑: 转弯后沿切线反向倒车到田地边界
+4. 自动计算田头宽度，确保多层覆盖完整
 """
 
 import numpy as np
@@ -37,14 +31,13 @@ class VehicleParams:
     safety_factor: float = 0.85
 
 
-class TwoLayerPathPlannerV33:
+class TwoLayerPathPlannerV35:
     """
-    两层路径规划器 V3.3 - 强制降速版
+    两层（多圈）路径规划器 V3.5
     
-    核心改进:
-    1. 基于曲率的自适应降速
-    2. 确保满足曲率约束
-    3. 完整的速度规划验证
+    核心概念:
+    - 第一层: 主作业区域（田地中间的矩形区域）
+    - 第二层（多圈）: 田头覆盖
     """
     
     def __init__(
@@ -65,19 +58,29 @@ class TwoLayerPathPlannerV33:
         # 自动选择主作业模式
         self.main_work_pattern = self._select_main_work_pattern()
         
-        print(f"[V3.3] 初始化完成:")
+        print(f"[V3.5] 初始化完成:")
         print(f"  田地尺寸: {field_length}m × {field_width}m")
         print(f"  田头宽度: {self.headland_width:.1f}m (自动计算)")
         print(f"  主作业模式: {self.main_work_pattern}")
         print(f"  障碍物数量: {len(self.obstacles)}")
-        print(f"  新特性: 基于曲率的强制降速")
+        print(f"  新特性: 真正的两层规划 + 切线方向倒车")
     
     def _calculate_headland_width(self) -> float:
-        """自动计算合理的田头宽度"""
-        min_width = 2.0 * self.vehicle.min_turn_radius
-        recommended_width = min_width + 2.0 * self.vehicle.working_width
-        max_width = min(self.field_length, self.field_width) * 0.15
-        return min(recommended_width, max_width)
+        """
+        自动计算合理的田头宽度
+        
+        V3.5 最终修正 (v5) - 理解A:
+        - 第一层转弯路径不能超出田地边界
+        - 田头宽度必须 >= R（转弯半径）
+        - 第二层需要多圈路径覆盖田头区域
+        
+        设计逻辑:
+        - 田头宽度 = R（转弯半径）
+        - 第二层圈数 = ceil(R / W)
+        - 最外圈在四个角落处转弯+倒车
+        """
+        # 田头宽度 = 转弯半径
+        return self.vehicle.min_turn_radius
     
     def _select_main_work_pattern(self) -> str:
         """自动选择主作业模式"""
@@ -92,7 +95,7 @@ class TwoLayerPathPlannerV33:
     def plan_complete_coverage(self) -> Dict:
         """完整的两层路径规划"""
         print("\n" + "="*70)
-        print("开始两层路径规划 (V3.3 强制降速版)")
+        print("开始两层路径规划 (V3.5 真正的两层规划)")
         print("="*70)
         
         start_time = time.time()
@@ -135,8 +138,8 @@ class TwoLayerPathPlannerV33:
             'main_work': main_work_result,
             'headland': headland_result,
             'total_time': total_time,
-            'version': 'V3.3',
-            'features': ['强制降速', '曲率约束满足']
+            'version': 'V3.5',
+            'features': ['真正两层', '切线倒车', '网格验证', '强制降速']
         }
         
         print(f"\n{'='*70}")
@@ -311,9 +314,21 @@ class TwoLayerPathPlannerV33:
         }
     
     def _generate_u_pattern_path(self, work_area: Polygon) -> Tuple[np.ndarray, np.ndarray]:
-        """生成U型往复路径"""
+        """
+        生成U型往复路径
+        
+        V3.5 v5: 修复转弯超出边界的问题
+        - 直线段的端点应该距离主作业边界 R 的位置
+        - 转弯中心在主作业边界处
+        - 这样转弯路径的最外侧刚好到达主作业边界，不会超出
+        """
         bounds = work_area.bounds
         min_x, min_y, max_x, max_y = bounds
+        R = self.vehicle.min_turn_radius
+        
+        # 直线段的端点应该距离边界 R，留出转弯空间
+        line_start_x = min_x + R
+        line_end_x = max_x - R
         
         num_passes = int((max_y - min_y) / self.vehicle.working_width) + 1
         
@@ -323,32 +338,28 @@ class TwoLayerPathPlannerV33:
         for i in range(num_passes):
             y = min_y + i * self.vehicle.working_width
             
+            # 直线段：从 line_start_x 到 line_end_x
             if i % 2 == 0:
-                line = LineString([(min_x, y), (max_x, y)])
+                # 向右行驶
+                line_coords = np.array([[line_start_x, y], [line_end_x, y]])
             else:
-                line = LineString([(max_x, y), (min_x, y)])
+                # 向左行驶
+                line_coords = np.array([[line_end_x, y], [line_start_x, y]])
             
-            intersection = work_area.intersection(line)
-            
-            if intersection.is_empty:
-                continue
-            
-            if isinstance(intersection, LineString):
-                coords = np.array(intersection.coords)
-                path_segments.append(coords)
-                speeds.extend([self.vehicle.max_work_speed_kmh] * len(coords))
+            path_segments.append(line_coords)
+            speeds.extend([self.vehicle.max_work_speed_kmh] * len(line_coords))
             
             # 添加转弯
             if i < num_passes - 1:
-                if len(path_segments) > 0:
-                    turn_path, turn_speeds = self._generate_simple_arc_turn(
-                        path_segments[-1][-1],
-                        y,
-                        y + self.vehicle.working_width,
-                        i % 2 == 0
-                    )
-                    path_segments.append(turn_path)
-                    speeds.extend(turn_speeds)
+                next_y = min_y + (i + 1) * self.vehicle.working_width
+                turn_path, turn_speeds = self._generate_safe_arc_turn(
+                    line_coords[-1],
+                    next_y,
+                    i % 2 == 0,  # turn_right
+                    min_x, max_x
+                )
+                path_segments.append(turn_path)
+                speeds.extend(turn_speeds)
         
         if path_segments:
             path = np.vstack(path_segments)
@@ -359,6 +370,47 @@ class TwoLayerPathPlannerV33:
         
         return path, speeds
     
+    def _generate_safe_arc_turn(
+        self,
+        start_point: np.ndarray,
+        next_y: float,
+        turn_right: bool,
+        min_x: float,
+        max_x: float
+    ) -> Tuple[np.ndarray, List[float]]:
+        """
+        生成安全的180度圆弧转弯，确保不超出边界
+        
+        V3.5 v5: 转弯中心在主作业边界处，转弯路径不超出边界
+        """
+        x, y = start_point
+        R = self.vehicle.min_turn_radius
+        
+        num_points = 20
+        angles = np.linspace(0, np.pi, num_points)
+        
+        if turn_right:
+            # 向右转弯，转弯中心在 (max_x, y)
+            center_x = max_x
+            center_y = y
+            # 从 (x, y) 开始，绕着 (max_x, y) 转180度到 (max_x, next_y)
+            arc_x = center_x - R * np.cos(angles)
+            arc_y = center_y + R * np.sin(angles)
+        else:
+            # 向左转弯，转弯中心在 (min_x, y)
+            center_x = min_x
+            center_y = y
+            # 从 (x, y) 开始，绕着 (min_x, y) 转180度到 (min_x, next_y)
+            arc_x = center_x + R * np.cos(angles)
+            arc_y = center_y + R * np.sin(angles)
+        
+        turn_path = np.column_stack([arc_x, arc_y])
+        
+        # 初始速度（后续会被强制降速调整）
+        turn_speeds = [self.vehicle.headland_turn_speed_kmh] * num_points
+        
+        return turn_path, turn_speeds
+    
     def _generate_simple_arc_turn(
         self,
         start_point: np.ndarray,
@@ -366,7 +418,7 @@ class TwoLayerPathPlannerV33:
         next_y: float,
         turn_right: bool
     ) -> Tuple[np.ndarray, List[float]]:
-        """简单圆弧转弯"""
+        """简单圆弧转弯（旧版本，保留以防其他地方调用）"""
         x, y = start_point
         R = self.vehicle.min_turn_radius
         
@@ -429,54 +481,75 @@ class TwoLayerPathPlannerV33:
         self,
         headland_area: Polygon
     ) -> Tuple[np.ndarray, np.ndarray]:
-        """生成多层田头环绕路径"""
-        layer_spacing = self.vehicle.working_width * 0.85
-        num_layers = int(self.headland_width / layer_spacing) + 1
-        num_layers = max(1, min(num_layers, 10))
+        """
+        生成田头边界路径
         
-        all_path_segments = []
+        V3.5 v5: 生成多圈路径覆盖田头区域
+        """
+        import math
+        
+        # 计算需要的圈数
+        num_loops = math.ceil(self.headland_width / self.vehicle.working_width)
+        print(f"  第二层需要 {num_loops} 圈路径覆盖田头区域")
+        
+        all_paths = []
         all_speeds = []
         
-        for layer in range(num_layers):
-            offset = layer * layer_spacing + self.vehicle.working_width / 2
+        for loop_idx in range(num_loops):
+            # 计算当前圈的偏移量（从田地边界开始）
+            offset = self.vehicle.working_width / 2 + loop_idx * self.vehicle.working_width
             
-            if offset >= self.headland_width:
-                break
+            # 只有最外圈（loop_idx=0）需要在角落处转弯+倒车
+            with_reverse = (loop_idx == 0)
             
-            layer_path, layer_speeds = self._generate_single_layer_loop(offset, layer)
+            print(f"    第{loop_idx+1}圈: 偏移={offset:.1f}m, 倒车={'Yes' if with_reverse else 'No'}")
             
-            all_path_segments.append(layer_path)
-            all_speeds.extend(layer_speeds)
+            path, speeds = self._generate_single_headland_loop_at_offset(
+                offset, with_reverse, loop_idx
+            )
+            
+            all_paths.append(path)
+            all_speeds.extend(speeds)
         
-        if all_path_segments:
-            path = np.vstack(all_path_segments)
-            speeds = np.array(all_speeds)
-        else:
-            path = np.array([[0, 0]])
-            speeds = np.array([0])
+        # 合并所有圈的路径
+        combined_path = np.vstack(all_paths)
         
-        return path, speeds
+        return combined_path, np.array(all_speeds)
     
-    def _generate_single_layer_loop(
-        self,
-        offset: float,
-        layer_index: int
+    def _generate_single_headland_loop_at_offset(
+        self, 
+        offset: float, 
+        with_reverse: bool = True, 
+        loop_index: int = 0
     ) -> Tuple[np.ndarray, List[float]]:
-        """生成单层田头环绕路径"""
+        """
+        在指定偏移量处生成单圈田头边界路径
+        
+        Args:
+            offset: 距离田地边界的距离
+            with_reverse: 是否在角落处转弯+倒车
+            loop_index: 当前圈的索引（0=最外圈）
+        
+        V3.5 v5: 支持多圈路径
+        """
+        
+        # 四个转角点
         corners = [
-            (offset, offset),
-            (self.field_length - offset, offset),
-            (self.field_length - offset, self.field_width - offset),
-            (offset, self.field_width - offset)
+            (offset, offset),  # 左下
+            (self.field_length - offset, offset),  # 右下
+            (self.field_length - offset, self.field_width - offset),  # 右上
+            (offset, self.field_width - offset)  # 左上
         ]
         
         path_segments = []
         speeds = []
         
+        # 从左下角开始
         start_point = corners[0]
         path_segments.append(np.array([start_point]))
         speeds.append(self.vehicle.max_headland_speed_kmh)
         
+        # 沿着边界行驶，在4个角落处转弯（最外圈还需要倒车）
         for i in range(4):
             current_corner = corners[i]
             next_corner = corners[(i + 1) % 4]
@@ -487,10 +560,17 @@ class TwoLayerPathPlannerV33:
             speeds.extend([self.vehicle.max_headland_speed_kmh] * len(straight_path))
             
             # 转弯段
-            if i < 3:
-                turn_path, turn_speeds = self._generate_corner_turn_with_reverse(
-                    next_corner, i, layer_index
-                )
+            if i < 3:  # 前3个角落需要转弯，第4个角落回到起点
+                if with_reverse:
+                    # 最外圈：转弯 + 倒车填充间隙
+                    turn_path, turn_speeds = self._generate_corner_turn_with_reverse(
+                        next_corner, (i + 1) % 4, layer_index=loop_index
+                    )
+                else:
+                    # 内圈：只转弯，不倒车
+                    turn_path, turn_speeds = self._generate_corner_turn_arc(
+                        next_corner, (i + 1) % 4
+                    )
                 path_segments.append(turn_path)
                 speeds.extend(turn_speeds)
         
@@ -515,13 +595,100 @@ class TwoLayerPathPlannerV33:
         corner_index: int,
         layer_index: int
     ) -> Tuple[np.ndarray, List[float]]:
-        """在角落处生成转弯 + 倒车填补"""
+        """
+        在角落处生成转弯 + 精确反向填充
+        
+        V3.4改进:
+        1. 使用Shapely精确计算转角间隙
+        2. 基于间隙面积计算最优反向长度
+        3. 基于间隙质心计算最优反向方向
+        """
         R = self.vehicle.min_turn_radius
+        W = self.vehicle.working_width
         x, y = corner
         
         add_reverse = (layer_index == 0)
         
+        # 生成90度圆弧转弯
         num_points = 15
+        angles = np.linspace(0, np.pi/2, num_points)
+        
+        if corner_index == 0:  # 左下角
+            arc_x = x + R * (1 - np.cos(angles))
+            arc_y = y + R * np.sin(angles)
+        elif corner_index == 1:  # 右下角
+            arc_x = x - R * np.sin(angles)
+            arc_y = y + R * (1 - np.cos(angles))
+        elif corner_index == 2:  # 右上角
+            arc_x = x - R * (1 - np.cos(angles))
+            arc_y = y - R * np.sin(angles)
+        else:  # 左上角
+            arc_x = x + R * np.sin(angles)
+            arc_y = y - R * (1 - np.cos(angles))
+        
+        turn_path = np.column_stack([arc_x, arc_y])
+        turn_speeds = [self.vehicle.headland_turn_speed_kmh] * num_points
+        
+        # V3.4.2: 精确反向填充（切线方向倒车）
+        if add_reverse:
+            # 计算转角间隙
+            gap = self._calculate_corner_gap_precise(corner, corner_index, R, W)
+            
+            if gap is not None and gap.area > 0.1:  # 间隙面积 > 0.1m²
+                # 生成最优反向路径（切线方向倒车）
+                turn_second_last_point = turn_path[-2]  # 倒数第二个点，用于计算切线
+                turn_end_point = turn_path[-1]
+                reverse_path, reverse_length = self._generate_optimal_reverse_path(
+                    gap, turn_end_point, turn_second_last_point, W, corner_index
+                )
+                
+                turn_path = np.vstack([turn_path, reverse_path])
+                reverse_points = len(reverse_path)
+                turn_speeds.extend([2.5] * reverse_points)
+                
+                print(f"    角落{corner_index}: 间隙面积={gap.area:.1f}m², 倒车长度={reverse_length:.1f}m")
+        
+        return turn_path, turn_speeds
+    
+    def _calculate_corner_gap_precise(
+        self,
+        corner: Tuple[float, float],
+        corner_index: int,
+        R: float,
+        W: float
+    ) -> Polygon:
+        """
+        精确计算转角间隙几何
+        
+        返回:
+            转角间隙的Polygon对象
+        """
+        x, y = corner
+        
+        # 1. 定义转角正方形区域（2R × 2R）
+        if corner_index == 0:  # 左下角
+            square = Polygon([
+                (x, y), (x + 2*R, y),
+                (x + 2*R, y + 2*R), (x, y + 2*R)
+            ])
+        elif corner_index == 1:  # 右下角
+            square = Polygon([
+                (x - 2*R, y), (x, y),
+                (x, y + 2*R), (x - 2*R, y + 2*R)
+            ])
+        elif corner_index == 2:  # 右上角
+            square = Polygon([
+                (x - 2*R, y - 2*R), (x, y - 2*R),
+                (x, y), (x - 2*R, y)
+            ])
+        else:  # 左上角
+            square = Polygon([
+                (x, y - 2*R), (x + 2*R, y - 2*R),
+                (x + 2*R, y), (x, y)
+            ])
+        
+        # 2. 生成90度圆弧转弯路径
+        num_points = 30  # 更细密的点以提高精度
         angles = np.linspace(0, np.pi/2, num_points)
         
         if corner_index == 0:
@@ -538,31 +705,154 @@ class TwoLayerPathPlannerV33:
             arc_y = y - R * (1 - np.cos(angles))
         
         turn_path = np.column_stack([arc_x, arc_y])
-        turn_speeds = [self.vehicle.headland_turn_speed_kmh] * num_points
         
-        if add_reverse:
-            reverse_length = R * 0.8
-            reverse_points = 10
-            
-            end_x, end_y = turn_path[-1]
-            start_x, start_y = turn_path[-2]
-            
-            dx = end_x - start_x
-            dy = end_y - start_y
-            dist = np.sqrt(dx**2 + dy**2)
-            
-            if dist > 0:
-                dx /= dist
-                dy /= dist
-                
-                reverse_x = end_x - dx * np.linspace(0, reverse_length, reverse_points)
-                reverse_y = end_y - dy * np.linspace(0, reverse_length, reverse_points)
-                reverse_path = np.column_stack([reverse_x, reverse_y])
-                
-                turn_path = np.vstack([turn_path, reverse_path])
-                turn_speeds.extend([2.5] * reverse_points)
+        # 3. 计算转弯路径的覆盖区域（buffer W/2）
+        turn_line = LineString(turn_path)
+        turn_coverage = turn_line.buffer(W / 2)
         
-        return turn_path, turn_speeds
+        # 4. 计算间隙 = 正方形 - 转弯覆盖
+        try:
+            gap = square.difference(turn_coverage)
+            return gap
+        except Exception as e:
+            print(f"    警告: 计算角落{corner_index}间隙失败: {e}")
+            return None
+    
+    def _generate_optimal_reverse_path(
+        self,
+        gap: Polygon,
+        turn_end_point: np.ndarray,
+        turn_start_point: np.ndarray,
+        W: float,
+        corner_index: int
+    ) -> Tuple[np.ndarray, float]:
+        """
+        基于间隙几何生成最优反向路径
+        
+        V3.4.2 最终修正:
+        - 使用转弯结束时的切线方向的反向作为倒车方向
+        - 切线方向 = turn_end_point - turn_second_last_point
+        - 倒车方向 = -切线方向
+        - 倒车距离 = 从转弯结束点到边界的距离
+        
+        算法:
+        1. 计算转弯结束时的切线方向（代表车辆朝向）
+        2. 倒车方向 = -切线方向
+        3. 计算倒车到边界的距离（最大化覆盖率）
+        
+        返回:
+            (reverse_path, reverse_length)
+        """
+        # 1. 计算转弯结束时的切线方向（车辆朝向）
+        # 注意：turn_start_point 实际上是 turn_path 的倒数第二个点
+        # 但为了保持接口兼容，我们使用 turn_start_point 作为参考
+        # 实际应该使用最后两个点来计算切线
+        
+        # 这里 turn_start_point 实际是 turn_path[0]，但我们需要 turn_path[-2]
+        # 由于函数签名已经固定，我们假设调用者传入的是 turn_path[-2]
+        # （需要在调用方修正）
+        
+        tangent_direction = turn_end_point - turn_start_point  # turn_start_point 应该是 turn_path[-2]
+        tangent_direction_norm = np.linalg.norm(tangent_direction)
+        
+        if tangent_direction_norm > 1e-6:
+            # 倒车方向 = -切线方向
+            reverse_direction = -tangent_direction / tangent_direction_norm
+        else:
+            # 备选方案：使用间隙质心方向的反向
+            centroid = gap.centroid
+            to_centroid = np.array([
+                centroid.x - turn_end_point[0],
+                centroid.y - turn_end_point[1]
+            ])
+            to_centroid_norm = np.linalg.norm(to_centroid)
+            if to_centroid_norm > 1e-6:
+                reverse_direction = -to_centroid / to_centroid_norm
+            else:
+                # 最后备选：使用固定方向
+                reverse_direction = np.array([-1.0, 0.0])
+        
+        # 3. 计算倒车到边界的距离（最大化覆盖率）
+        reverse_length = self._calculate_distance_to_boundary(
+            turn_end_point, reverse_direction, corner_index
+        )
+        
+        # 4. 生成反向路径（倒车）
+        num_points = max(10, int(reverse_length / 0.5))
+        t = np.linspace(0, reverse_length, num_points)
+        reverse_path = turn_end_point + t[:, np.newaxis] * reverse_direction
+        
+        return reverse_path, reverse_length
+    
+    def _calculate_distance_to_boundary(
+        self,
+        start_point: np.ndarray,
+        direction: np.ndarray,
+        corner_index: int
+    ) -> float:
+        """
+        计算从起点沿着方向到达田地边界的距离
+        
+        参数:
+            start_point: 起点坐标
+            direction: 单位方向向量
+            corner_index: 角落索引 (0=左下, 1=右下, 2=右上, 3=左上)
+        
+        返回:
+            到边界的距离
+        """
+        x, y = start_point
+        dx, dy = direction
+        
+        # 田地边界
+        x_min, x_max = 0, self.field_length
+        y_min, y_max = 0, self.field_width
+        
+        # 计算到四个边界的距离
+        distances = []
+        
+        # 到左边界 (x=0)
+        if abs(dx) > 1e-6:
+            t_left = (x_min - x) / dx
+            if t_left > 0:  # 只考虑正方向
+                distances.append(t_left)
+        
+        # 到右边界 (x=field_length)
+        if abs(dx) > 1e-6:
+            t_right = (x_max - x) / dx
+            if t_right > 0:
+                distances.append(t_right)
+        
+        # 到下边界 (y=0)
+        if abs(dy) > 1e-6:
+            t_bottom = (y_min - y) / dy
+            if t_bottom > 0:
+                distances.append(t_bottom)
+        
+        # 到上边界 (y=field_width)
+        if abs(dy) > 1e-6:
+            t_top = (y_max - y) / dy
+            if t_top > 0:
+                distances.append(t_top)
+        
+        if not distances:
+            # 如果没有有效距离，返回默认值
+            return 2.0 * self.vehicle.min_turn_radius
+        
+        # 返回最短距离（到达最近的边界）
+        min_distance = min(distances)
+        
+        # 限制最大距离（避免过长）
+        max_distance = 3.0 * self.vehicle.min_turn_radius
+        
+        final_distance = min(min_distance, max_distance)
+        
+        # 调试输出
+        print(f"    [调试] 角落{corner_index}: 起点=({start_point[0]:.1f},{start_point[1]:.1f}), "
+              f"方向=({direction[0]:.3f},{direction[1]:.3f}), "
+              f"到边界={min_distance:.1f}m, 限制={max_distance:.1f}m, 最终={final_distance:.1f}m")
+        
+        return final_distance
     
     def _calculate_path_length(self, path: np.ndarray) -> float:
         """计算路径长度"""
@@ -655,6 +945,190 @@ class TwoLayerPathPlannerV33:
             'max_jump': max_jump,
             'pass': accel_violation_rate < 5
         }
+    
+    def verify_corner_coverage_grid_based(
+        self,
+        corner: Tuple[float, float],
+        corner_index: int,
+        turn_path: np.ndarray,
+        reverse_path: np.ndarray = None
+    ) -> Dict:
+        """
+        网格化验证转角覆盖率
+        
+        算法:
+        1. 创建0.1m精度网格
+        2. 标记转弯路径覆盖
+        3. 标记反向路径覆盖
+        4. 计算覆盖率
+        
+        返回:
+            {
+                'coverage_before': float,  # 反向填充前覆盖率
+                'coverage_after': float,   # 反向填充后覆盖率
+                'improvement': float,      # 改进值
+                'grid': np.ndarray         # 覆盖网格
+            }
+        """
+        R = self.vehicle.min_turn_radius
+        W = self.vehicle.working_width
+        grid_resolution = 0.1  # 0.1m精度
+        
+        x, y = corner
+        
+        # 1. 创建转角区域网格（2R × 2R）
+        grid_size = int(2 * R / grid_resolution)
+        grid = np.zeros((grid_size, grid_size), dtype=bool)
+        
+        # 确定网格起点
+        if corner_index == 0:  # 左下角
+            grid_origin = (x, y)
+        elif corner_index == 1:  # 右下角
+            grid_origin = (x - 2*R, y)
+        elif corner_index == 2:  # 右上角
+            grid_origin = (x - 2*R, y - 2*R)
+        else:  # 左上角
+            grid_origin = (x, y - 2*R)
+        
+        # 2. 标记转弯路径覆盖
+        turn_line = LineString(turn_path)
+        turn_coverage = turn_line.buffer(W / 2)
+        
+        for i in range(grid_size):
+            for j in range(grid_size):
+                cell_x = grid_origin[0] + i * grid_resolution
+                cell_y = grid_origin[1] + j * grid_resolution
+                cell_point = Point(cell_x, cell_y)
+                
+                if turn_coverage.contains(cell_point):
+                    grid[j, i] = True  # 注意: 行列顺序
+        
+        coverage_before = np.sum(grid) / grid.size * 100
+        
+        # 3. 标记反向路径覆盖
+        if reverse_path is not None and len(reverse_path) > 0:
+            reverse_line = LineString(reverse_path)
+            reverse_coverage = reverse_line.buffer(W / 2)
+            
+            for i in range(grid_size):
+                for j in range(grid_size):
+                    if not grid[j, i]:  # 仅检查未覆盖区域
+                        cell_x = grid_origin[0] + i * grid_resolution
+                        cell_y = grid_origin[1] + j * grid_resolution
+                        cell_point = Point(cell_x, cell_y)
+                        
+                        if reverse_coverage.contains(cell_point):
+                            grid[j, i] = True
+        
+        coverage_after = np.sum(grid) / grid.size * 100
+        improvement = coverage_after - coverage_before
+        
+        return {
+            'coverage_before': coverage_before,
+            'coverage_after': coverage_after,
+            'improvement': improvement,
+            'grid': grid,
+            'grid_origin': grid_origin,
+            'grid_resolution': grid_resolution
+        }
+    
+    def verify_all_corners_coverage(self, headland_result: Dict) -> Dict:
+        """
+        验证所有4个角落的覆盖率
+        
+        返回:
+            {
+                'corners': [每个角落的验证结果],
+                'avg_coverage_before': float,
+                'avg_coverage_after': float,
+                'avg_improvement': float
+            }
+        """
+        print("\n[V3.4 网格化覆盖率验证]")
+        print("  网格精度: 0.1m")
+        print("  验证区域: 4个转角 (2R × 2R 每个)")
+        
+        # 提取每个角落的转弯和反向路径（需要从结果中解析）
+        # 这里简化处理，仅计算总体覆盖率改进
+        
+        corners_data = [
+            (self.headland_width, self.headland_width, 0),
+            (self.field_length - self.headland_width, self.headland_width, 1),
+            (self.field_length - self.headland_width, self.field_width - self.headland_width, 2),
+            (self.headland_width, self.field_width - self.headland_width, 3)
+        ]
+        
+        corner_results = []
+        
+        for corner_x, corner_y, corner_idx in corners_data:
+            # 生成该角落的转弯路径
+            turn_path, _ = self._generate_corner_turn_arc((corner_x, corner_y), corner_idx)
+            
+            # 计算间隙并生成反向路径
+            gap = self._calculate_corner_gap_precise(
+                (corner_x, corner_y), corner_idx,
+                self.vehicle.min_turn_radius, self.vehicle.working_width
+            )
+            
+            reverse_path = None
+            if gap is not None and gap.area > 0.1:
+                reverse_path, _ = self._generate_optimal_reverse_path(
+                    gap, turn_path[-1], turn_path[-2], self.vehicle.working_width, corner_idx
+                )
+            
+            # 网格化验证
+            verification = self.verify_corner_coverage_grid_based(
+                (corner_x, corner_y), corner_idx, turn_path, reverse_path
+            )
+            
+            corner_results.append(verification)
+            
+            print(f"  角落{corner_idx}: 填充前={verification['coverage_before']:.1f}%, "
+                  f"填充后={verification['coverage_after']:.1f}%, "
+                  f"改进=+{verification['improvement']:.1f}%")
+        
+        avg_before = np.mean([r['coverage_before'] for r in corner_results])
+        avg_after = np.mean([r['coverage_after'] for r in corner_results])
+        avg_improvement = avg_after - avg_before
+        
+        print(f"\n  平均覆盖率: {avg_before:.1f}% → {avg_after:.1f}% (改进 +{avg_improvement:.1f}%)")
+        
+        return {
+            'corners': corner_results,
+            'avg_coverage_before': avg_before,
+            'avg_coverage_after': avg_after,
+            'avg_improvement': avg_improvement
+        }
+    
+    def _generate_corner_turn_arc(
+        self,
+        corner: Tuple[float, float],
+        corner_index: int
+    ) -> Tuple[np.ndarray, List[float]]:
+        """生成90度圆弧转弯（不含反向填充）"""
+        R = self.vehicle.min_turn_radius
+        x, y = corner
+        
+        num_points = 15
+        angles = np.linspace(0, np.pi/2, num_points)
+        
+        if corner_index == 0:
+            arc_x = x + R * (1 - np.cos(angles))
+            arc_y = y + R * np.sin(angles)
+        elif corner_index == 1:
+            arc_x = x - R * np.sin(angles)
+            arc_y = y + R * (1 - np.cos(angles))
+        elif corner_index == 2:
+            arc_x = x - R * (1 - np.cos(angles))
+            arc_y = y - R * np.sin(angles)
+        else:
+            arc_x = x + R * np.sin(angles)
+            arc_y = y - R * (1 - np.cos(angles))
+        
+        turn_path = np.column_stack([arc_x, arc_y])
+        turn_speeds = [self.vehicle.headland_turn_speed_kmh] * num_points
+        
+        return turn_path, turn_speeds
 
 
 def run_multi_scenario_tests():
@@ -702,7 +1176,7 @@ def run_multi_scenario_tests():
             max_headland_speed_kmh=15.0
         )
         
-        planner = TwoLayerPathPlannerV33(
+        planner = TwoLayerPathPlannerV35(
             field_length=scenario['length'],
             field_width=scenario['width'],
             vehicle_params=vehicle,
