@@ -14,7 +14,7 @@
 
 V3.5版本彻底重构了路径规划的顶层设计，实现了用户定义的"真正的两层规划"：
 
-| 特性 | V3.0 (之前版本) | **V3.5 (当前版本)** | 改进说明 |
+| 特性 | V3.0 (之前版本) | **V3.6 (当前版本)** | 改进说明 |
 | :--- | :--- | :--- | :--- |
 | **规划层级** | 错误的多层田头 | ✅ **真正的两层** | 主作业区域 + 多圈田头 |
 | **田头宽度** | 经验值 | ✅ **R (转弯半径)** | 确保转弯不超出边界 |
@@ -251,7 +251,7 @@ pip install numpy shapely matplotlib
 ### 基本使用
 
 ```python
-from multi_layer_planner_v3 import TwoLayerPlannerV35
+from multi_layer_planner_v3 import TwoLayerPlannerV36
 
 # 1. 定义车辆参数
 vehicle_params = VehicleParams(
@@ -308,7 +308,10 @@ result = planner.plan()
 
 ## 版本历史
 
-### V3.5.1 (2025-10-20) - 当前版本
+### V3.6.0 (2025-10-20) - 当前版本
+- ✅ 支持倾斜的矩形和平行四边形全覆盖路径规划
+
+### V3.5.1 (2025-10-20) 
 - ✅ 智能起点选择 (Smart Start Point Selection)
 
 ### V3.5.0 (2025-10-20)
