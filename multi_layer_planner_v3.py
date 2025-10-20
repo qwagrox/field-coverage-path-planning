@@ -235,15 +235,15 @@ class TwoLayerPathPlannerV36:
     
     def _calculate_rotation_angle(self) -> float:
         """
-        计算旋转角度，使得平行四边形的底边水平
+        计算旋转角度，使得田块的底边水平
+        
+        V3.6: 支持倾斜矩形和平行四边形
+        - 即使是矩形，如果它是倾斜的，也需要旋转
         
         Returns:
             angle: 旋转角度（弧度）
         """
-        if self.field_shape == 'rectangle':
-            return 0.0  # 矩形不需要旋转
-        
-        # 使用底边（顶点0到顶点1）
+        # 使用底边（顶点0到顶点1）计算旋转角度
         v0 = self.field_vertices[0]
         v1 = self.field_vertices[1]
         
