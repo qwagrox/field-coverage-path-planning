@@ -1,11 +1,17 @@
 """
-多层路径规划器 V3.5
+两层路径规划器 V3.6 - 支持平行四边形田块
 
-核心修正:
-1. 第一层: 主作业区域的U型往复路径
-2. 第二层（多圈）: 只有一圈的田头边界路径 + 4个转角的转弯和倒车
-3. 倒车逻辑: 转弯后沿切线反向倒车到田地边界
-4. 自动计算田头宽度，确保多层覆盖完整
+核心新增:
+1. 支持多边形顶点输入（平行四边形、矩形）
+2. 自动识别田块形状
+3. 根据角度判断角落覆盖策略
+4. 坐标系旋转技术处理倾斜田块
+5. 保持向后兼容
+
+版本历史:
+- V3.0-V3.4.2: 早期版本
+- V3.5: 真正的两层规划 + 智能起点选择
+- V3.6: 支持平行四边形田块（本版本）
 """
 
 import numpy as np
@@ -31,29 +37,42 @@ class VehicleParams:
     safety_factor: float = 0.85
 
 
-class TwoLayerPathPlannerV35:
+class TwoLayerPathPlannerV36:
     """
-    两层路径规划器 V3.5 - 真正的两层规划
+    两层路径规划器 V3.6 - 支持平行四边形田块
     
     核心概念:
-    - 第一层: 主作业区域（田地中间的矩形区域）
-    - 第二层（多圈）: 田头覆盖
-
+    - 第一层: 主作业区域（U型往复路径）
+    - 第二层: 田头覆盖（多圈边界路径）
+    
+    V3.6 新增:
+    1. 支持平行四边形和矩形田块
+    2. 自动识别田块形状
+    3. 根据角度智能判断角落覆盖策略
+    4. 坐标系旋转处理倾斜田块
     """
     
     def __init__(
         self,
-        field_length: float,
-        field_width: float,
         vehicle_params: VehicleParams,
+        field_length: float = None,
+        field_width: float = None,
+        field_vertices: List[Tuple[float, float]] = None,
         obstacles: List[List[Tuple[float, float]]] = None,
         start_point: Tuple[float, float] = None,
         end_point: Tuple[float, float] = None
     ):
-        self.field_length = field_length
-        self.field_width = field_width
         self.vehicle = vehicle_params
         self.obstacles = obstacles or []
+        
+        # 处理田块输入（向后兼容）
+        self._process_field_input(field_length, field_width, field_vertices)
+        
+        # 自动识别田块形状
+        self.field_shape = self._detect_field_shape()
+        
+        # 计算角落角度
+        self.corner_angles = [self._calculate_corner_angle(i) for i in range(len(self.field_vertices))]
         
         # 自动计算田头宽度
         self.headland_width = self._calculate_headland_width()
@@ -61,12 +80,15 @@ class TwoLayerPathPlannerV35:
         # 自动选择主作业模式
         self.main_work_pattern = self._select_main_work_pattern()
         
-        # 起点和终点约束 (V3.5.1 新增)
+        # 起点和终点约束 (V3.5.1)
         self.start_point = self._validate_point(start_point, "start")
         self.end_point = self._validate_point(end_point, "end")
         
-        print(f"[V3.5.1] 初始化完成:")
-        print(f"  田地尺寸: {field_length}m × {field_width}m")
+        print(f"[V3.6.0] 初始化完成:")
+        print(f"  田块形状: {self.field_shape}")
+        print(f"  田块顶点: {len(self.field_vertices)}个")
+        if self.field_shape == 'parallelogram':
+            print(f"  角落角度: {[f'{a:.1f}°' for a in self.corner_angles]}")
         print(f"  田头宽度: {self.headland_width:.1f}m (自动计算)")
         print(f"  主作业模式: {self.main_work_pattern}")
         print(f"  障碍物数量: {len(self.obstacles)}")
@@ -74,7 +96,193 @@ class TwoLayerPathPlannerV35:
             print(f"  起点位置: ({self.start_point[0]:.1f}, {self.start_point[1]:.1f})")
         if self.end_point:
             print(f"  终点位置: ({self.end_point[0]:.1f}, {self.end_point[1]:.1f})")
-        print(f"  新特性: 真正的两层规划 + 切线方向倒车 + 智能起点选择")
+        print(f"  新特性: 平行四边形支持 + 角度判断 + 智能起点选择")
+    
+    def _process_field_input(self, field_length, field_width, field_vertices):
+        """
+        处理田块输入，支持两种方式：
+        1. field_length + field_width（矩形，向后兼容）
+        2. field_vertices（多边形顶点）
+        """
+        if field_vertices is not None:
+            # 使用多边形顶点
+            self.field_vertices = field_vertices
+            self.field_polygon = Polygon(field_vertices)
+            # 计算等效的field_length和field_width（用于兼容性）
+            bounds = self.field_polygon.bounds
+            self.field_length = bounds[2] - bounds[0]
+            self.field_width = bounds[3] - bounds[1]
+        elif field_length is not None and field_width is not None:
+            # 使用矩形参数（向后兼容）
+            self.field_length = field_length
+            self.field_width = field_width
+            self.field_vertices = [
+                (0, 0),
+                (field_length, 0),
+                (field_length, field_width),
+                (0, field_width)
+            ]
+            self.field_polygon = Polygon(self.field_vertices)
+        else:
+            raise ValueError("必须提供 field_vertices 或 (field_length, field_width)")
+    
+    def _detect_field_shape(self) -> str:
+        """
+        自动识别田块形状
+        
+        Returns:
+            'rectangle': 矩形（4个90度角）
+            'parallelogram': 平行四边形（对边平行）
+            'other': 其他形状（暂不支持）
+        """
+        vertices = self.field_vertices
+        n = len(vertices)
+        
+        if n != 4:
+            return 'other'  # 只支持四边形
+        
+        # 计算4个角的角度
+        angles = [self._calculate_corner_angle(i) for i in range(4)]
+        
+        # 检查是否是矩形（4个90度角）
+        if all(abs(angle - 90) < 1.0 for angle in angles):
+            return 'rectangle'
+        
+        # 检查是否是平行四边形（对边平行）
+        if self._is_parallelogram(vertices):
+            return 'parallelogram'
+        
+        return 'other'
+    
+    def _calculate_corner_angle(self, corner_index: int) -> float:
+        """
+        计算角落的内角（度）
+        
+        Args:
+            corner_index: 角落索引 (0-3)
+        
+        Returns:
+            angle: 内角（度），范围 [0, 180]
+        """
+        vertices = self.field_vertices
+        n = len(vertices)
+        
+        # 前一个顶点、当前顶点、下一个顶点
+        prev = vertices[(corner_index - 1) % n]
+        curr = vertices[corner_index]
+        next_v = vertices[(corner_index + 1) % n]
+        
+        # 向量
+        v1 = np.array([prev[0] - curr[0], prev[1] - curr[1]])
+        v2 = np.array([next_v[0] - curr[0], next_v[1] - curr[1]])
+        
+        # 计算夹角
+        cos_angle = np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
+        angle_rad = np.arccos(np.clip(cos_angle, -1.0, 1.0))
+        angle_deg = np.degrees(angle_rad)
+        
+        return angle_deg
+    
+    def _is_parallelogram(self, vertices: List[Tuple[float, float]]) -> bool:
+        """
+        检查四边形是否是平行四边形
+        
+        平行四边形的特征：对边平行且相等
+        """
+        if len(vertices) != 4:
+            return False
+        
+        # 计算4条边的向量
+        edges = []
+        for i in range(4):
+            v1 = vertices[i]
+            v2 = vertices[(i + 1) % 4]
+            edge = np.array([v2[0] - v1[0], v2[1] - v1[1]])
+            edges.append(edge)
+        
+        # 检查对边是否平行（向量平行）
+        # 边0和边2应该平行
+        # 边1和边3应该平行
+        def are_parallel(v1, v2, tolerance=0.01):
+            # 使用叉积判断平行
+            cross = abs(v1[0] * v2[1] - v1[1] * v2[0])
+            return cross < tolerance * (np.linalg.norm(v1) * np.linalg.norm(v2))
+        
+        parallel_01_23 = are_parallel(edges[0], edges[2])
+        parallel_12_30 = are_parallel(edges[1], edges[3])
+        
+        return parallel_01_23 and parallel_12_30
+    
+    def _should_apply_reverse_filling(self, corner_index: int) -> bool:
+        """
+        判断是否应该在该角落进行倒车填充
+        
+        Args:
+            corner_index: 角落索引
+        
+        Returns:
+            True: 应该倒车填充
+            False: 跳过倒车（角度太锐）
+        """
+        angle = self.corner_angles[corner_index]
+        
+        if angle >= 90:
+            return True  # 直角或钝角，可以覆盖
+        elif angle >= 60:
+            return True  # 60-90度，部分覆盖
+        else:
+            return False  # < 60度，跳过
+    
+    def _calculate_rotation_angle(self) -> float:
+        """
+        计算旋转角度，使得平行四边形的底边水平
+        
+        Returns:
+            angle: 旋转角度（弧度）
+        """
+        if self.field_shape == 'rectangle':
+            return 0.0  # 矩形不需要旋转
+        
+        # 使用底边（顶点0到顶点1）
+        v0 = self.field_vertices[0]
+        v1 = self.field_vertices[1]
+        
+        # 计算底边的角度
+        dx = v1[0] - v0[0]
+        dy = v1[1] - v0[1]
+        angle = np.arctan2(dy, dx)
+        
+        return angle
+    
+    def _rotate_point(self, point: Tuple[float, float], angle: float, center: Tuple[float, float] = (0, 0)) -> Tuple[float, float]:
+        """旋转点坐标"""
+        x, y = point
+        cx, cy = center
+        
+        # 平移到原点
+        x -= cx
+        y -= cy
+        
+        # 旋转
+        cos_a = np.cos(angle)
+        sin_a = np.sin(angle)
+        x_new = x * cos_a - y * sin_a
+        y_new = x * sin_a + y * cos_a
+        
+        # 平移回去
+        x_new += cx
+        y_new += cy
+        
+        return (x_new, y_new)
+    
+    def _rotate_polygon(self, polygon: Polygon, angle: float) -> Polygon:
+        """旋转多边形"""
+        center = polygon.centroid.coords[0]
+        rotated_vertices = [
+            self._rotate_point(v, angle, center)
+            for v in polygon.exterior.coords[:-1]
+        ]
+        return Polygon(rotated_vertices)
     
     def _calculate_headland_width(self) -> float:
         """
@@ -374,13 +582,12 @@ class TwoLayerPathPlannerV35:
     
     def _plan_main_work_area(self) -> Dict:
         """规划主作业区域（第1层）"""
-        # 定义主作业区域边界
-        main_boundary = Polygon([
-            (self.headland_width, self.headland_width),
-            (self.field_length - self.headland_width, self.headland_width),
-            (self.field_length - self.headland_width, self.field_width - self.headland_width),
-            (self.headland_width, self.field_width - self.headland_width)
-        ])
+        # 定义主作业区域边界（使用field_vertices向内偏移）
+        field_boundary = Polygon(self.field_vertices)
+        main_boundary = field_boundary.buffer(-self.headland_width)
+        
+        if main_boundary.is_empty or main_boundary.area < 1.0:
+            raise ValueError(f"田头宽度{self.headland_width}m过大，无法定义主作业区域")
         
         # 处理障碍物
         if self.obstacles:
@@ -417,10 +624,40 @@ class TwoLayerPathPlannerV35:
         """
         生成U型往复路径
         
-        V3.5 v5: 修复转弯超出边界的问题
-        - 直线段的端点应该距离主作业边界 R 的位置
-        - 转弯中心在主作业边界处
-        - 这样转弯路径的最外侧刚好到达主作业边界，不会超出
+        V3.6: 支持平行四边形
+        - 对于平行四边形，旋转坐标系使底边水平
+        - 在旋转后的坐标系中生成U型路径
+        - 旋转路径回到原坐标系
+        """
+        # 1. 计算旋转角度
+        rotation_angle = self._calculate_rotation_angle()
+        
+        # 2. 旋转主作业区域到水平
+        if abs(rotation_angle) > 0.01:  # 需要旋转
+            rotated_work_area = self._rotate_polygon(work_area, -rotation_angle)
+        else:
+            rotated_work_area = work_area
+        
+        # 3. 在旋转后的坐标系中生成U型路径
+        rotated_path, speeds = self._generate_u_pattern_in_rotated_space(rotated_work_area)
+        
+        # 4. 旋转路径回到原坐标系
+        if abs(rotation_angle) > 0.01:
+            center = work_area.centroid.coords[0]
+            original_path = np.array([
+                self._rotate_point(tuple(p), rotation_angle, center)
+                for p in rotated_path
+            ])
+        else:
+            original_path = rotated_path
+        
+        return original_path, speeds
+    
+    def _generate_u_pattern_in_rotated_space(self, work_area: Polygon) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        在旋转后的坐标系中生成U型往复路径
+        
+        此时work_area的底边已经是水平的
         """
         bounds = work_area.bounds
         min_x, min_y, max_x, max_y = bounds
@@ -546,22 +783,17 @@ class TwoLayerPathPlannerV35:
         Args:
             start_corner_index: 起始角落索引 (0=左下, 1=右下, 2=右上, 3=左上)
         """
-        # 田头区域
-        field_boundary = Polygon([
-            (0, 0),
-            (self.field_length, 0),
-            (self.field_length, self.field_width),
-            (0, self.field_width)
-        ])
+        # 田头区域（使用field_vertices）
+        field_boundary = Polygon(self.field_vertices)
         
-        main_boundary = Polygon([
-            (self.headland_width, self.headland_width),
-            (self.field_length - self.headland_width, self.headland_width),
-            (self.field_length - self.headland_width, self.field_width - self.headland_width),
-            (self.headland_width, self.field_width - self.headland_width)
-        ])
+        # 主作业区域边界（向内偏移headland_width）
+        main_boundary = field_boundary.buffer(-self.headland_width)
         
-        headland_area = field_boundary.difference(main_boundary)
+        if main_boundary.is_empty or main_boundary.area < 1.0:
+            # 偏移过大，田头区域就是整个田块
+            headland_area = field_boundary
+        else:
+            headland_area = field_boundary.difference(main_boundary)
         
         # 生成多层环绕路径
         path, speeds = self._generate_multilayer_headland(headland_area, start_corner_index=start_corner_index)
@@ -647,13 +879,16 @@ class TwoLayerPathPlannerV35:
         V3.5.1: 支持智能起点选择
         """
         
-        # 四个转角点
-        corners = [
-            (offset, offset),  # 左下
-            (self.field_length - offset, offset),  # 右下
-            (self.field_length - offset, self.field_width - offset),  # 右上
-            (offset, self.field_width - offset)  # 左上
-        ]
+        # 四个转角点（使用田块顶点向内偏移）
+        field_polygon = Polygon(self.field_vertices)
+        offset_polygon = field_polygon.buffer(-offset)
+        
+        if offset_polygon.is_empty or offset_polygon.area < 1.0:
+            # 偏移过大，返回空路径
+            return np.array([]), []
+        
+        # 获取偏移后的顶点
+        corners = list(offset_polygon.exterior.coords[:-1])  # 去掉最后一个重复点
         
         path_segments = []
         speeds = []
@@ -723,7 +958,8 @@ class TwoLayerPathPlannerV35:
         W = self.vehicle.working_width
         x, y = corner
         
-        add_reverse = (layer_index == 0)
+        # V3.6: 根据角度判断是否倒车
+        add_reverse = (layer_index == 0) and self._should_apply_reverse_filling(corner_index)
         
         # 生成90度圆弧转弯
         num_points = 15
@@ -1049,7 +1285,7 @@ class TwoLayerPathPlannerV35:
         total_area = area.area
         
         if total_area > 0:
-            return (covered_area / total_area) * 100
+            return covered_area / total_area  # 返回0-1范围，不是百分比
         else:
             return 0.0
     
