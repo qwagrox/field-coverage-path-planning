@@ -1,5 +1,7 @@
 # 面向商业化两层田间全覆盖路径规划器
 
+[English](./README_en.md) | 简体中文
+
 - **版本**: 3.6.0
 - **作者**: [tangyong@stmail.ujs.edu.cn](mailto:tangyong@stmail.ujs.edu.cn)，目前就读于江苏大学农机控制理论与工程博士
 - **日期**: 2025/10/20
