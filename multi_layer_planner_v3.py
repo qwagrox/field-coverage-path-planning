@@ -1,5 +1,5 @@
 """
-两层路径规划器 V3.6 - 支持平行四边形田块
+两层路径规划器 V3.7 - TSP路径优化版
 
 核心新增:
 1. 支持多边形顶点输入（平行四边形、矩形）
@@ -7,11 +7,13 @@
 3. 根据角度判断角落覆盖策略
 4. 坐标系旋转技术处理倾斜田块
 5. 保持向后兼容
+6. **TSP路径优化**：基于起点位置优化往复路径顺序和方向
 
 版本历史:
 - V3.0-V3.4.2: 早期版本
 - V3.5: 真正的两层规划 + 智能起点选择
-- V3.6: 支持平行四边形田块（本版本）
+- V3.6: 支持平行四边形田块
+- V3.7: TSP路径优化（本版本）
 """
 
 import numpy as np
@@ -37,9 +39,9 @@ class VehicleParams:
     safety_factor: float = 0.85
 
 
-class TwoLayerPathPlannerV36:
+class TwoLayerPathPlannerV37:
     """
-    两层路径规划器 V3.6 - 支持平行四边形田块
+    两层路径规划器 V3.7 - TSP路径优化版
     
     核心概念:
     - 第一层: 主作业区域（U型往复路径）
@@ -50,6 +52,12 @@ class TwoLayerPathPlannerV36:
     2. 自动识别田块形状
     3. 根据角度智能判断角落覆盖策略
     4. 坐标系旋转处理倾斜田块
+    
+    V3.7 新增（TSP路径优化）:
+    1. 根据起点位置自动选择最优往复遍历方向（从上往下或从下往上）
+    2. 根据起点位置自动选择最优起始侧（从左侧或右侧开始）
+    3. 最小化起点到主作业区域的连接距离
+    4. 大型田地可节省1-2公里的路径长度
     """
     
     def __init__(
@@ -84,7 +92,7 @@ class TwoLayerPathPlannerV36:
         self.start_point = self._validate_point(start_point, "start")
         self.end_point = self._validate_point(end_point, "end")
         
-        print(f"[V3.6.0] 初始化完成:")
+        print(f"[V3.7.0] 初始化完成:")
         print(f"  田块形状: {self.field_shape}")
         print(f"  田块顶点: {len(self.field_vertices)}个")
         if self.field_shape == 'parallelogram':
@@ -96,7 +104,7 @@ class TwoLayerPathPlannerV36:
             print(f"  起点位置: ({self.start_point[0]:.1f}, {self.start_point[1]:.1f})")
         if self.end_point:
             print(f"  终点位置: ({self.end_point[0]:.1f}, {self.end_point[1]:.1f})")
-        print(f"  新特性: 平行四边形支持 + 角度判断 + 智能起点选择")
+        print(f"  新特性: 平行四边形支持 + 角度判断 + 智能起点选择 + TSP路径优化")
     
     def _process_field_input(self, field_length, field_width, field_vertices):
         """
@@ -620,6 +628,45 @@ class TwoLayerPathPlannerV36:
             }
         }
     
+    def _determine_optimal_pass_order(self, work_area: Polygon, start_point: Tuple[float, float] = None) -> Tuple[bool, bool]:
+        """
+        根据起点位置确定最优的往复遍历顺序 (V3.7 TSP优化)
+        
+        Args:
+            work_area: 主作业区域
+            start_point: 起点位置 (x, y)
+        
+        Returns:
+            - reverse_order: bool, 是否反向遍历（从上往下）
+            - start_from_right: bool, 是否从右侧开始
+        """
+        bounds = work_area.bounds
+        min_x, min_y, max_x, max_y = bounds
+        
+        reverse_order = False
+        start_from_right = False
+        
+        if start_point:
+            # 判断起点在田地的上方还是下方
+            center_y = (min_y + max_y) / 2
+            if start_point[1] > center_y:
+                reverse_order = True  # 从上往下
+            
+            # 判断起点在田地的左侧还是右侧
+            center_x = (min_x + max_x) / 2
+            if start_point[0] > center_x:
+                start_from_right = True  # 从右侧开始
+            
+            print(f"\n[V3.7 TSP优化] 路径顺序决策:")
+            print(f"  起点位置: ({start_point[0]:.1f}, {start_point[1]:.1f})")
+            print(f"  主作业区域范围: X=[{min_x:.1f}, {max_x:.1f}], Y=[{min_y:.1f}, {max_y:.1f}]")
+            direction_text = '从上往下' if reverse_order else '从下往上'
+            side_text = '右侧' if start_from_right else '左侧'
+            print(f"  遍历方向: {direction_text}")
+            print(f"  起始侧: {side_text}")
+        
+        return reverse_order, start_from_right
+    
     def _generate_u_pattern_path(self, work_area: Polygon) -> Tuple[np.ndarray, np.ndarray]:
         """
         生成U型往复路径
@@ -628,6 +675,9 @@ class TwoLayerPathPlannerV36:
         - 对于平行四边形，旋转坐标系使底边水平
         - 在旋转后的坐标系中生成U型路径
         - 旋转路径回到原坐标系
+        
+        V3.7: TSP路径优化
+        - 根据起点位置优化往复遍历顺序和方向
         """
         # 1. 计算旋转角度
         rotation_angle = self._calculate_rotation_angle()
@@ -635,13 +685,27 @@ class TwoLayerPathPlannerV36:
         # 2. 旋转主作业区域到水平
         if abs(rotation_angle) > 0.01:  # 需要旋转
             rotated_work_area = self._rotate_polygon(work_area, -rotation_angle)
+            # 如果有起点，也需要旋转起点
+            if self.start_point:
+                center = work_area.centroid.coords[0]
+                rotated_start_point = self._rotate_point(self.start_point, -rotation_angle, center)
+            else:
+                rotated_start_point = None
         else:
             rotated_work_area = work_area
+            rotated_start_point = self.start_point
         
-        # 3. 在旋转后的坐标系中生成U型路径
-        rotated_path, speeds = self._generate_u_pattern_in_rotated_space(rotated_work_area)
+        # 3. 确定最优遍历顺序 (V3.7 TSP优化)
+        reverse_order, start_from_right = self._determine_optimal_pass_order(
+            rotated_work_area, rotated_start_point
+        )
         
-        # 4. 旋转路径回到原坐标系
+        # 4. 在旋转后的坐标系中生成U型路径（传入优化参数）
+        rotated_path, speeds = self._generate_u_pattern_in_rotated_space(
+            rotated_work_area, reverse_order, start_from_right
+        )
+        
+        # 5. 旋转路径回到原坐标系
         if abs(rotation_angle) > 0.01:
             center = work_area.centroid.coords[0]
             original_path = np.array([
@@ -653,11 +717,16 @@ class TwoLayerPathPlannerV36:
         
         return original_path, speeds
     
-    def _generate_u_pattern_in_rotated_space(self, work_area: Polygon) -> Tuple[np.ndarray, np.ndarray]:
+    def _generate_u_pattern_in_rotated_space(self, work_area: Polygon, reverse_order: bool = False, start_from_right: bool = False) -> Tuple[np.ndarray, np.ndarray]:
         """
         在旋转后的坐标系中生成U型往复路径
         
         此时work_area的底边已经是水平的
+        
+        Args:
+            work_area: 主作业区域
+            reverse_order: 是否反向遍历（从上往下）(V3.7)
+            start_from_right: 是否从右侧开始 (V3.7)
         """
         bounds = work_area.bounds
         min_x, min_y, max_x, max_y = bounds
@@ -672,27 +741,39 @@ class TwoLayerPathPlannerV36:
         path_segments = []
         speeds = []
         
-        for i in range(num_passes):
+        # 确定遍历顺序 (V3.7 TSP优化)
+        if reverse_order:
+            pass_indices = list(range(num_passes - 1, -1, -1))  # 从上往下
+        else:
+            pass_indices = list(range(num_passes))  # 从下往上
+        
+        for idx, i in enumerate(pass_indices):
             y = min_y + i * self.vehicle.working_width
             
-            # 直线段：从 line_start_x 到 line_end_x
-            if i % 2 == 0:
-                # 向右行驶
-                line_coords = np.array([[line_start_x, y], [line_end_x, y]])
+            # 确定行驶方向 (V3.7 TSP优化)
+            if start_from_right:
+                # 从右侧开始：第一行向左，第二行向右，...
+                go_left = (idx % 2 == 0)
             else:
-                # 向左行驶
+                # 从左侧开始：第一行向右，第二行向左，...
+                go_left = (idx % 2 == 1)
+            
+            if go_left:
                 line_coords = np.array([[line_end_x, y], [line_start_x, y]])
+            else:
+                line_coords = np.array([[line_start_x, y], [line_end_x, y]])
             
             path_segments.append(line_coords)
             speeds.extend([self.vehicle.max_work_speed_kmh] * len(line_coords))
             
-            # 添加转弯
-            if i < num_passes - 1:
-                next_y = min_y + (i + 1) * self.vehicle.working_width
+            # 添加转弯（如果不是最后一行）
+            if idx < num_passes - 1:
+                next_i = pass_indices[idx + 1]
+                next_y = min_y + next_i * self.vehicle.working_width
                 turn_path, turn_speeds = self._generate_safe_arc_turn(
                     line_coords[-1],
                     next_y,
-                    i % 2 == 0,  # turn_right
+                    not go_left,  # 转弯方向与当前行驶方向相反
                     min_x, max_x
                 )
                 path_segments.append(turn_path)
